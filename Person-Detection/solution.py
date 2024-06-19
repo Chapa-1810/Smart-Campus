@@ -3,42 +3,40 @@ import numpy as np
 import requests
 import time
 import cv2 as cv
+from enum import IntEnum
 
 from depthai_sdk import OakCamera
 from numpy import linalg as LA
 from robothub import LiveView
 from robothub.application import BaseApplication
 
+
+class States(IntEnum):
+    IDLE = -1
+    IN_LINE = 0
+    BEING_ATTENDED = 1
+
 class DetectionParams:
     def __init__(self):
         self.id = 0
         self.prev_time = 0.0
+        self.in_line_time = 0.0
+        self.being_attended_time = 0.0
         self.current_spent_time = 0.0
-        self.prev_position = None
-        self.crossed_line = False
+        self.state = States.IDLE 
 
-
-def getAverage(detectionParamsArray : list):
-    accum = 0.0
-
-    for sent_time in detectionParamsArray:
-        accum += sent_time
-
-    if accum > 0:
-        return accum / len(detectionParamsArray)
-    else:
-        return 0
-
-class LineCrossingCounter:
-    bottom_up = 0
-    up_bottom = 0
-    current_detections = 0
-    previous_positions: dict = {}
-
-    detection_dict = {}
+class PersonCounter:
+    def __init__(self):
+        self.detection_dict : dict = {}
+        self.removed_detections : list = []
+        self.binary_roi = None
+        self.attended_roi = None
+        self.elapsed_time = 0.0
+        self.prev_time = time.time()
+        self.TIME_THRESHOLD = 10.0
+        self.averages = [0.0,0.0,0.0]
 
     def process_packets(self, packets):
-        frame = packets['color'].getCvFrame()
         color_packet = packets['color']
         nn_packet = packets['3_out;0_video']
 
@@ -46,60 +44,91 @@ class LineCrossingCounter:
         detections = nn_packet.detections
 
         for key in list(self.detection_dict.keys()):
-            if key not in [tracklet.id for tracklet in tracklets]:
-                self.detection_dict.pop(key)
+            if key not in [tracklet.id for tracklet in tracklets] and self.detection_dict[key].state == States.BEING_ATTENDED:
+                self.removed_detections.append(self.detection_dict.pop(key))
 
         for detection, tracklet in zip(detections, tracklets):
             tracklet_id = tracklet.id
             tracklet_status = tracklet.status
 
-            #print (f"ID: {tracklet_id} Status: {tracklet_status}")
+            ### Get relevant information from the tracklet
+            bbox = [*detection.top_left, *detection.bottom_right]
+            h, w = nn_packet.frame.shape[:2]
+            normalized_roi = tracklet.roi.denormalize(w, h)
+            current_position = self.get_roi_center(normalized_roi)
+
+            # Check if the current_position lies within the binary_roi
+            if self.binary_roi is not None and not self.binary_roi[int(current_position[1]), int(current_position[0])]:
+                if tracklet_id in self.detection_dict.keys():
+                    self.detection_dict.pop(tracklet_id)
+                continue
         
+            ### Analyze the tracklet
             if tracklet_id not in self.detection_dict.keys():
                 self.detection_dict[tracklet_id] = DetectionParams()
                 self.detection_dict[tracklet_id].id = tracklet_id
                 self.detection_dict[tracklet_id].prev_time = time.time()
                 self.detection_dict[tracklet_id].current_spent_time = 0.0
-                self.detection_dict[tracklet_id].prev_position = None
-                self.detection_dict[tracklet_id].crossed_line = False
-            elif tracklet_id in self.detection_dict.keys() and tracklet_status == dai.Tracklet.TrackingStatus.REMOVED:
-                self.detection_dict.pop(tracklet_id)
+                self.detection_dict[tracklet_id].state = States.IN_LINE
+            elif self.detection_dict[tracklet_id].state == States.IN_LINE and self.attended_roi is not None and not self.attended_roi[int(current_position[1]), int(current_position[0])]:
+                 self.detection_dict[tracklet_id].state = States.BEING_ATTENDED
+            elif tracklet_status == dai.Tracklet.TrackingStatus.REMOVED:
+                self.removed_detections.append(self.detection_dict.pop(tracklet_id))
                 continue
-            else:
-                self.detection_dict[tracklet_id].current_spent_time += float(time.time() - self.detection_dict[tracklet_id].prev_time)
-                self.detection_dict[tracklet_id].prev_time = time.time()
+            
+            ### Calculate the time spent in line and being attended
+            if self.detection_dict[tracklet_id].state == States.IN_LINE:
+                self.detection_dict[tracklet_id].in_line_time += float(time.time() - self.detection_dict[tracklet_id].prev_time)
+            elif self.detection_dict[tracklet_id].state == States.BEING_ATTENDED:
+                self.detection_dict[tracklet_id].being_attended_time += float(time.time() - self.detection_dict[tracklet_id].prev_time)  
 
-
-            bbox = [*detection.top_left, *detection.bottom_right]
-            h, w = nn_packet.frame.shape[:2]
-            normalized_roi = tracklet.roi.denormalize(w, h)
-            current_position = self.get_roi_center(normalized_roi)
-            previous_position = self.detection_dict[tracklet_id].prev_position
-
-            if previous_position is not None and not self.detection_dict[tracklet_id].crossed_line:
-                points = [self.LINE_P1, self.LINE_P2, previous_position, current_position]
-                self.calc_ins(points, tracklet_id)
-                points = [self.LINE_P3, self.LINE_P4, previous_position, current_position]
-                self.calc_outs(points, tracklet_id)
+            self.detection_dict[tracklet_id].current_spent_time += float(time.time() - self.detection_dict[tracklet_id].prev_time)
+            self.detection_dict[tracklet_id].prev_time = time.time()    
                 
             ident = "     " + str(tracklet_id)
 
-            self.detection_dict[tracklet_id].prev_position = current_position
-
             self.live_view.add_rectangle(rectangle=bbox, label=detection.label + ident)
         
-        average = getAverage([detection.current_spent_time for detection in self.detection_dict.values()])
+        self.calc_averages()
 
-        self.live_view.add_text(f'Out: {self.bottom_up}, In: {self.up_bottom}, Current: {self.bottom_up - self.up_bottom}, Detections: {len(self.detection_dict.keys())}, Average time: {average:.2f}',
+        self.live_view.add_text("Averages",
+                                coords=(100, 100),size=40,color=(50,50,50),thickness=25)
+        self.live_view.add_text(f'Total: {self.averages[0]}, In line: {self.averages[1]}, Attended: {self.averages[2]}, Detections: {len(self.removed_detections)}',
                                 coords=(100, 100),size=40,color=(50,50,50),thickness=20)
         self.live_view.add_text(f"Detections: {[detection.id for detection in self.detection_dict.values()]}",
-                                coords=(100, 200),size=40,color=(50,50,50),thickness=20)
+                                coords=(100, 200),size=40,color=(50,50,50),thickness=10)
         self.live_view.add_text(f"Seconds: {[f'{detection.current_spent_time:.2f}' for detection in self.detection_dict.values()]}",
-                                coords=(100, 240),size=40,color=(50,50,50),thickness=20)
-       
-        self.live_view.add_line(self.LINE_P1, self.LINE_P2,color=(250,250,250),thickness= 100 )
-        self.live_view.add_line(self.LINE_P3, self.LINE_P4,color=(250,250,250),thickness= 100 )
+                                coords=(100, 240),size=40,color=(50,50,50),thickness=10)
+        self.live_view.add_text(f"States: {[detection.state for detection in self.detection_dict.values()]}", 
+                                coords=(100, 280),size=40,color=(50,50,50),thickness=10)
+        
         self.live_view.publish(color_packet.frame)
+
+        self.elapsed_time = time.time() - self.prev_time
+
+    def calc_averages(self):
+        if (self.elapsed_time) / 60 < self.TIME_THRESHOLD:
+            return
+        
+        self.elapsed_time = 0.0
+        self.prev_time = time.time()
+
+        avg_spent_time = 0.0
+        avg_line_time = 0.0
+        avg_attended_time = 0.0
+
+        for detection in self.removed_detections:
+            avg_spent_time += detection.current_spent_time
+            avg_line_time += detection.in_line_time
+            avg_attended_time += detection.being_attended_time
+        
+        avg_spent_time /= len(self.removed_detections)
+        avg_line_time /= len(self.removed_detections)
+        avg_attended_time /= len(self.removed_detections)
+
+        self.averages = [avg_spent_time, avg_line_time, avg_attended_time]
+
+        ### INSERT TO DATABASE
 
     def calc_vector_angle(self, point1, point2, point3, point4):
         u = self.create_vector(point1, point2)
@@ -145,11 +174,11 @@ class LineCrossingCounter:
 
 
 class Application(BaseApplication):
-    line_cross_counter = LineCrossingCounter()
+    person_counter = PersonCounter()
 
     def setup_pipeline(self, oak: OakCamera):
         color = oak.create_camera(source='color', fps=15, encode='h264')
-        detection_nn = oak.create_nn(model='yolov8n_coco_640x352', input=color, tracker=True)
+        detection_nn = oak.create_nn(model='z', input=color, tracker=True)
         detection_nn.config_nn(resize_mode='stretch')
         detection_nn.config_tracker(tracker_type=dai.TrackerType.SHORT_TERM_IMAGELESS,
                                     track_labels=[0],  # track cars and motocycles only
@@ -159,10 +188,10 @@ class Application(BaseApplication):
                                     apply_tracking_filter=True,
                                     forget_after_n_frames=15)
         
-        self.line_cross_counter.live_view = LiveView.create(device=oak, component=color, name='Line Cross stream', unique_key=f'line_cross_stream',
+        self.person_counter.live_view = LiveView.create(device=oak, component=color, name='Line Cross stream', unique_key=f'line_cross_stream',
                                                             manual_publish=True)
         
-        oak.sync([color.out.encoded, detection_nn.out.tracker], self.line_cross_counter.process_packets)
+        oak.sync([color.out.encoded, detection_nn.out.tracker], self.person_counter.process_packets)
 
 if __name__ == "__main__":
     app = Application()
