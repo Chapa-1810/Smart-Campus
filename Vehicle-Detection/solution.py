@@ -165,7 +165,7 @@ class Application(BaseApplication):
     line_cross_counter = LineCrossingCounter()
 
     def setup_pipeline(self, oak: OakCamera):
-        color = oak.create_camera(source='color', fps=10, encode='h264')
+        color = oak.create_camera(source='color', fps=10, encode='h264', resolution='1080p')
         detection_nn = oak.create_nn(model='vehicle-detection-0202', input=color, tracker=True)
         detection_nn.config_nn(resize_mode='stretch')
         detection_nn.config_tracker(tracker_type=dai.TrackerType.ZERO_TERM_COLOR_HISTOGRAM,
