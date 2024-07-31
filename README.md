@@ -1,1 +1,10 @@
 ### Tecnolgico de Monterrey Smart Campus
+
+# DepthAI-SDK core
+All the implementations of this project, use an specific version of the DepthAI python SDK. With the help of LuxonisHub, it is posible to copy the containers in which this version works correctly, therefore, for different applications to work based in the same code, it is necessary first to clone the container for the application to work correctly, a new container will not work. With that being said, the depthai-sdk has two main components, first it's neural-network node, in which a model can be uploaded if converted to a blob, and the depthai tracker implementation. This are know as packets at the depthai sdk, this packets are objects that contain the data in the sdk forms, in some version this data can be converted to other objects compatible with opencv for example, however during the worked period, it was not achieved. 
+
+# Person detection 
+The person detection algorithm uses an enhanced implementation of the vehicle detection algorithm. In it there's multiple key points, first of all is the states of the detected objects. After the already explained depthai main algorithm with trackelts, the person detection algorithm uses diferent binary masks generated at *utils* to get the IOU of the object with this ones. How it works for the cetec tower, is that the IOU for every costumer will always be higher at the beginning with the line_mask, in this way, new detected persons appended to the line will alway become part of the in_line state, therefore when removed, their times will be avergaed with the removed_detections list.
+
+# Vehicle detection
+The vehicle detection algorithm uses the depthai-sdk core implementation, however, to determine if the vehicle is comming out or in, it uses it's vector with the last detection to find an intersection with a line. This used to be the implementation for the first iteration of the camera position. However when changed to a bird-eye view, it should be better to use masks to determine also if the vehicle is entering or leaving the parking lot on the multiple cameras that can be used at the entrypoint. 
