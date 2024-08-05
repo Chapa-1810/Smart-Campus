@@ -172,16 +172,18 @@ class PersonCounter:
                                 coords=(100, 280),size=40,color=(50,50,50),thickness=10)
         self.live_view.publish(color_packet.frame)
  
-        self.elapsed_time = time.time() - self.prev_time # Calculate the elapsed time since the last calculation
+        # self.elapsed_time = time.time() - self.prev_time # Calculate the elapsed time since the last calculation
+        self.elapsed_time += float(time.time() - self.prev_time) # Calculate the elapsed time since the last calculation
+        self.prev_time = time.time()
 
     # Redo function 
 
     def calc_averages(self):
-        if (self.elapsed_time) / 60 < self.TIME_THRESHOLD or len(self.removed_detections) == 0: # If the elapsed time is less than the threshold or there are no detections,
+        if (self.elapsed_time / 60) < self.TIME_THRESHOLD or len(self.removed_detections) <= 0: # If the elapsed time is less than the threshold or there are no detections,
             return
         
         self.elapsed_time = 0.0
-        self.prev_time = time.time()
+        # self.prev_time = time.time()
 
         avg_attended_spent_time = 0.0
         avg_attended_line_time = 0.0
