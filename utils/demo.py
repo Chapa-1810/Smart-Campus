@@ -38,7 +38,7 @@ def main():
   alpha = 0.3
   result = cv.VideoWriter(output_video,  
                          cv.VideoWriter_fourcc(*'mp4v'), 
-                         10, frame.shape[:2]) 
+                         10, (frame.shape[1], frame.shape[0])) 
   while ret:
     overlay = frame.copy()
     output = frame.copy()
@@ -58,6 +58,9 @@ def main():
     if key == ord('q'):
       break
     ret, frame = video.read()
+
+  video.release()
+  result.release()
 
 
 if __name__ == "__main__":
